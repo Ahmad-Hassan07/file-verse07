@@ -36,6 +36,35 @@ struct FSConfig {
     }
 };
 
+#pragma pack(push,1)
+struct MetadataEntry {
+    uint8_t valid_flag;
+    uint8_t type_flag;
+    uint32_t parent_index;
+    char short_name[12];
+    uint32_t start_index;
+    uint64_t total_size;
+    uint32_t owner;
+    uint32_t permissions;
+    uint64_t created_time;
+    uint64_t modified_time;
+    uint8_t reserved[18];
+    MetadataEntry() {
+        valid_flag = 1;
+        type_flag = 0;
+        parent_index = 0;
+        for (int i = 0; i < 12; i++) short_name[i] = 0;
+        start_index = 0;
+        total_size = 0;
+        owner = 0;
+        permissions = 0;
+        created_time = 0;
+        modified_time = 0;
+        for (int i = 0; i < 18; i++) reserved[i] = 0;
+    }
+};
+#pragma pack(pop)
+
 struct ByteSpan {
     uint64_t offset;
     uint64_t size;

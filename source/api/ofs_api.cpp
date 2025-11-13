@@ -30,6 +30,13 @@ void fs_shutdown(void* instance) {
 }
 
 int fs_format(const char* omni_path, const char* config_path) {
+    if (!omni_path) return (int)OFSErrorCodes::ERROR_INVALID_OPERATION;
+    FSConfig cfg;
+    const char* cfg_path = config_path;
+    if (!cfg_path || cfg_path[0] == 0) cfg_path = "compiled/default.uconf";
+    if (!parse_uconf(cfg_path, cfg)) return (int)OFSErrorCodes::ERROR_INVALID_CONFIG;
+    FileSystem fs;
+    if (!fs.format_new(cfg, omni_path)) return (int)OFSErrorCodes::ERROR_IO_ERROR;
     return (int)OFSErrorCodes::SUCCESS;
 }
 

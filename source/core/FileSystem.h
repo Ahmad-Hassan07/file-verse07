@@ -20,14 +20,14 @@ class FileSystem {
     UserManager user_mgr;
     MountLayout layout;
 public:
-    FileSystem(): header() {}
+    FileSystem() : header() {}
     bool load_empty(const FSConfig& cfg) {
         unsigned long long total = cfg.total_size;
         omni.resize(total);
         layout.user_table_offset = cfg.header_size;
         layout.user_table_size = cfg.max_users * sizeof(UserInfo);
         layout.meta_offset = layout.user_table_offset + layout.user_table_size;
-        layout.meta_size = cfg.max_inodes * 72;
+        layout.meta_size = cfg.max_inodes * sizeof(MetadataEntry);
         layout.free_map_offset = layout.meta_offset + layout.meta_size;
         unsigned long long blocks = (total - layout.free_map_offset) / cfg.block_size;
         unsigned long long bitmap_bytes = (blocks + 7) / 8;
@@ -39,6 +39,7 @@ public:
         free_mgr.bind(&bitmap_area, (unsigned int)blocks);
         return true;
     }
+    bool format_new(const FSConfig& cfg, const char* omni_path);
     BlockManager& blocks() { return block_mgr; }
     FreeSpaceManager& freemap() { return free_mgr; }
     SecurityManager& security() { return sec_mgr; }

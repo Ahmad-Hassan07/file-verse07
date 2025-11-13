@@ -1,11 +1,14 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <fstream>
 
 #include "source/include/odf_types.hpp"
 #include "source/include/ofs_internal.h"
 
 #include "source/api/ofs_api.h"
+#include "source/core/config_parser.h"
+#include "source/core/FileSystem.h"
 
 #include "source/data_structures/SinglyLinkedList.h"
 #include "source/data_structures/Stack.h"
@@ -15,14 +18,58 @@
 #include "source/data_structures/DirectoryNode.h"
 
 int main() {
-    void* instance = nullptr;
-    int rc = fs_init(&instance, "filesystem.omni", "compiled/default.uconf");
-    std::cout << "fs_init rc = " << rc << std::endl;
+    FSConfig cfg;
+    const char* cfg_path = "compiled/default.uconf";
+    bool ok_cfg = parse_uconf(cfg_path, cfg);
+    std::cout << "parse_uconf(" << cfg_path << ") = " << (ok_cfg ? 1 : 0) << std::endl;
+    if (ok_cfg) {
+        std::cout << "total_size = " << cfg.total_size << std::endl;
+        std::cout << "block_size = " << cfg.block_size << std::endl;
+        std::cout << "max_users = " << cfg.max_users << std::endl;
+        std::cout << "max_inodes = " << cfg.max_inodes << std::endl;
+    }
 
-    if (rc == (int)OFSErrorCodes::SUCCESS) {
+    const char* omni_path = "compiled/test.omni";
+    int rc_fmt = fs_format(omni_path, cfg_path);
+    std::cout << "fs_format rc = " << rc_fmt << std::endl;
+
+    if (rc_fmt == (int)OFSErrorCodes::SUCCESS) {
+        std::ifstream f(omni_path, std::ios::binary | std::ios::ate);
+        if (f.is_open()) {
+            std::streamsize sz = f.tellg();
+            std::cout << "formatted omni size = " << (long long)sz << std::endl;
+            f.close();
+        } else {
+            std::cout << "could not open formatted omni file" << std::endl;
+        }
+    }
+
+    void* instance = nullptr;
+    int rc_init = fs_init(&instance, omni_path, cfg_path);
+    std::cout << "fs_init rc = " << rc_init << std::endl;
+
+    if (rc_init == (int)OFSErrorCodes::SUCCESS) {
         std::cout << "fs_init success" << std::endl;
     } else {
         std::cout << "fs_init failed" << std::endl;
+    }
+
+    if (instance) {
+        FileSystem* fs = (FileSystem*)instance;
+        FreeSpaceManager& fm = fs->freemap();
+        BlockManager& bm = fs->blocks();
+
+        unsigned int b1 = 0, b2 = 0, b3 = 0;
+        bool a1 = fm.allocate_one(b1);
+        bool a2 = fm.allocate_one(b2);
+        bool a3 = fm.allocate_one(b3);
+        std::cout << "block allocations: " << a1 << " " << b1 << " , " << a2 << " " << b2 << " , " << a3 << " " << b3 << std::endl;
+
+        if (a1) {
+            std::vector<unsigned char> blk;
+            bm.read_block(b1, blk);
+            std::cout << "read_block size for b1 = " << blk.size() << std::endl;
+        }
     }
 
     Stack<int> s;
