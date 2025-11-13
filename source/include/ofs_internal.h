@@ -4,11 +4,36 @@
 
 struct FSConfig {
     uint64_t total_size;
+    uint64_t header_size;
     uint64_t block_size;
     uint32_t max_users;
     uint32_t max_inodes;
     char student_id[32];
     char submission_date[16];
+    char admin_username[32];
+    char admin_password[32];
+    char private_key[64];
+    uint32_t require_auth;
+    uint32_t server_port;
+    uint32_t max_connections;
+    FSConfig() {
+        total_size = 0;
+        header_size = 512;
+        block_size = 0;
+        max_users = 0;
+        max_inodes = 0;
+        require_auth = 0;
+        server_port = 0;
+        max_connections = 0;
+        for (int i = 0; i < 32; i++) {
+            student_id[i] = 0;
+            submission_date[i < 16 ? i : 0] = submission_date[i < 16 ? i : 0];
+            admin_username[i] = 0;
+            admin_password[i] = 0;
+        }
+        for (int i = 0; i < 16; i++) submission_date[i] = 0;
+        for (int i = 0; i < 64; i++) private_key[i] = 0;
+    }
 };
 
 struct ByteSpan {
