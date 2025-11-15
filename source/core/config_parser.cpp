@@ -73,11 +73,12 @@ bool parse_uconf(const char* path, FSConfig& out) {
                 for (int i = 0; i < 32; i++) out.admin_password[i] = 0;
                 for (unsigned long long i = 0; i < value.size() && i < 31; i++) out.admin_password[i] = value[i];
             } else if (key == "require_auth") {
-                out.require_auth = to_bool(value) ? 1u : 0u;
-            } else if (key == "private_key") {
-                for (int i = 0; i < 64; i++) out.private_key[i] = 0;
-                for (unsigned long long i = 0; i < value.size() && i < 63; i++) out.private_key[i] = value[i];
-            }
+    out.require_auth = to_bool(value) ? 1u : 0u;
+} else if (key == "private_key") {
+    for (int i = 0; i < 64; i++) out.private_key[i] = 0;
+    for (unsigned long long i = 0; i < value.size() && i < 63; i++) out.private_key[i] = value[i];
+}
+
         } else if (section == "server") {
             if (key == "port") {
                 unsigned long long v = std::stoull(value);
