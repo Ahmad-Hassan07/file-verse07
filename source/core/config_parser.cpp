@@ -1,94 +1,145 @@
+// config_parser.cpp
 #include "config_parser.h"
+
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <algorithm>
 #include <cctype>
+#include <cstring>
 
-static std::string trim(const std::string& s) {
-    unsigned long long i = 0;
-    unsigned long long j = s.size();
-    while (i < j && std::isspace((unsigned char)s[i])) i++;
-    while (j > i && std::isspace((unsigned char)s[j - 1])) j--;
-    return s.substr(i, j - i);
+// Helper: trim whitespace from both ends of a std::string
+static inline void trim(std::string& s) {
+    auto not_space = [](int ch) { return !std::isspace(ch); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
 }
 
-static std::string strip_quotes(const std::string& s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+// Helper: strip optional surrounding quotes
+static inline std::string strip_quotes(const std::string& s) {
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
+                          (s.front() == '\'' && s.back() == '\''))) {
         return s.substr(1, s.size() - 2);
     }
     return s;
 }
 
-static bool to_bool(const std::string& s) {
-    std::string v = s;
-    for (unsigned long long i = 0; i < v.size(); i++) {
-        char c = v[i];
-        if (c >= 'A' && c <= 'Z') v[i] = (char)(c - 'A' + 'a');
+// Helper: case-insensitive compare
+static inline bool iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
     }
-    return v == "1" || v == "true" || v == "yes" || v == "on";
+    return true;
 }
 
-bool parse_uconf(const char* path, FSConfig& out) {
+bool parse_uconf(const char* path, FSConfig& cfg) {
+    if (!path) return false;
+
     std::ifstream in(path);
-    if (!in.is_open()) return false;
+    if (!in.is_open()) {
+        return false;
+    }
+
     std::string line;
-    std::string section;
+    std::string current_section;
+
     while (std::getline(in, line)) {
-        line = trim(line);
+        // Remove comments starting with '#' or ';'
+        auto comment_pos = line.find('#');
+        if (comment_pos != std::string::npos) {
+            line.erase(comment_pos);
+        }
+        comment_pos = line.find(';');
+        if (comment_pos != std::string::npos) {
+            line.erase(comment_pos);
+        }
+
+        trim(line);
         if (line.empty()) continue;
-        char c0 = line[0];
-        if (c0 == '#' || c0 == ';') continue;
-        if (c0 == '[') {
-            unsigned long long pos = line.find(']');
-            if (pos != std::string::npos && pos > 1) {
-                section = line.substr(1, pos - 1);
-            } else {
-                section.clear();
-            }
+
+        // Section header: [filesystem], [security], [server]
+        if (line.front() == '[' && line.back() == ']') {
+            current_section = line.substr(1, line.size() - 2);
+            trim(current_section);
             continue;
         }
-        unsigned long long eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-        value = strip_quotes(value);
-        if (section == "filesystem") {
-            if (key == "total_size") {
-                out.total_size = std::stoull(value);
-            } else if (key == "header_size") {
-                out.header_size = std::stoull(value);
-            } else if (key == "block_size") {
-                out.block_size = std::stoull(value);
-            } else if (key == "max_files") {
-                unsigned long long v = std::stoull(value);
-                out.max_inodes = (uint32_t)v;
-            }
-        } else if (section == "security") {
-            if (key == "max_users") {
-                unsigned long long v = std::stoull(value);
-                out.max_users = (uint32_t)v;
-            } else if (key == "admin_username") {
-                for (int i = 0; i < 32; i++) out.admin_username[i] = 0;
-                for (unsigned long long i = 0; i < value.size() && i < 31; i++) out.admin_username[i] = value[i];
-            } else if (key == "admin_password") {
-                for (int i = 0; i < 32; i++) out.admin_password[i] = 0;
-                for (unsigned long long i = 0; i < value.size() && i < 31; i++) out.admin_password[i] = value[i];
-            } else if (key == "require_auth") {
-    out.require_auth = to_bool(value) ? 1u : 0u;
-} else if (key == "private_key") {
-    for (int i = 0; i < 64; i++) out.private_key[i] = 0;
-    for (unsigned long long i = 0; i < value.size() && i < 63; i++) out.private_key[i] = value[i];
-}
 
-        } else if (section == "server") {
-            if (key == "port") {
-                unsigned long long v = std::stoull(value);
-                out.server_port = (uint32_t)v;
-            } else if (key == "max_connections") {
-                unsigned long long v = std::stoull(value);
-                out.max_connections = (uint32_t)v;
+        // Key = value
+        auto eq_pos = line.find('=');
+        if (eq_pos == std::string::npos) {
+            // malformed line
+            continue;
+        }
+
+        std::string key = line.substr(0, eq_pos);
+        std::string value = line.substr(eq_pos + 1);
+
+        trim(key);
+        trim(value);
+
+        // Now parse based on section + key
+        if (iequals(current_section, "filesystem")) {
+            if (iequals(key, "total_size")) {
+                cfg.total_size = static_cast<uint64_t>(std::stoull(value));
+            } else if (iequals(key, "header_size")) {
+                cfg.header_size = static_cast<uint32_t>(std::stoul(value));
+            } else if (iequals(key, "block_size")) {
+                cfg.block_size = static_cast<uint32_t>(std::stoul(value));
+            } else if (iequals(key, "max_files")) {
+                cfg.max_files = static_cast<uint32_t>(std::stoul(value));
+            } else if (iequals(key, "max_filename_length")) {
+                cfg.max_filename_length = static_cast<uint32_t>(std::stoul(value));
+            }
+        } else if (iequals(current_section, "security")) {
+            if (iequals(key, "max_users")) {
+                cfg.max_users = static_cast<uint32_t>(std::stoul(value));
+            } else if (iequals(key, "admin_username")) {
+                std::string v = strip_quotes(value);
+                std::memset(cfg.admin_username, 0, sizeof(cfg.admin_username));
+                std::strncpy(cfg.admin_username, v.c_str(), sizeof(cfg.admin_username) - 1);
+            } else if (iequals(key, "admin_password")) {
+                std::string v = strip_quotes(value);
+                std::memset(cfg.admin_password, 0, sizeof(cfg.admin_password));
+                std::strncpy(cfg.admin_password, v.c_str(), sizeof(cfg.admin_password) - 1);
+            } else if (iequals(key, "require_auth")) {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                if (v == "true" || v == "1") {
+                    cfg.require_auth = 1;
+                } else {
+                    cfg.require_auth = 0;
+                }
+            } else if (iequals(key, "key") || iequals(key, "private_key")) {
+                std::string v = strip_quotes(value);
+                std::memset(cfg.private_key, 0, sizeof(cfg.private_key));
+                // Copy up to 64 bytes of key data; we don't guarantee null-termination.
+                std::memcpy(cfg.private_key, v.data(), std::min(v.size(), sizeof(cfg.private_key)));
+            }
+        } else if (iequals(current_section, "server")) {
+            if (iequals(key, "port")) {
+                cfg.server_port = static_cast<uint16_t>(std::stoul(value));
+            } else if (iequals(key, "max_connections")) {
+                cfg.max_connections = static_cast<uint32_t>(std::stoul(value));
+            } else if (iequals(key, "queue_timeout")) {
+                cfg.queue_timeout = static_cast<uint32_t>(std::stoul(value));
             }
         }
     }
-    if (out.total_size == 0 || out.block_size == 0 || out.max_users == 0 || out.max_inodes == 0) return false;
+
+    // Basic sanity checks: we require at least these to be non-zero
+    if (cfg.total_size == 0 ||
+        cfg.header_size == 0 ||
+        cfg.block_size == 0 ||
+        cfg.max_files == 0 ||
+        cfg.max_users == 0 ||
+        cfg.server_port == 0) {
+        return false;
+    }
+
     return true;
 }

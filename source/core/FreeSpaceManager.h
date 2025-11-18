@@ -1,7 +1,5 @@
 #pragma once
 #include <vector>
-#include "../include/odf_types.hpp"
-#include "../include/ofs_internal.h"
 #include "../data_structures/Stack.h"
 
 class FreeSpaceManager {
@@ -9,12 +7,12 @@ class FreeSpaceManager {
     unsigned int blocks;
     Stack<unsigned int> free_stack;
 public:
-    FreeSpaceManager(): bitmap(nullptr), blocks(0) {}
-
+    FreeSpaceManager() {
+        bitmap = nullptr;
+        blocks = 0;
+    }
     void bind(std::vector<unsigned char>* bm, unsigned int total_blocks);
     bool mark_used(unsigned int i);
-
     bool mark_free(unsigned int i);
-
     bool allocate_one(unsigned int& out);
 };

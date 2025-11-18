@@ -1,55 +1,53 @@
-#include "MetadataManager.h"
-#include <cstring>
+#include "FreeSpaceManager.h"
 #include <iostream>
 
-void MetadataManager::configure(BlockManager* bm, FreeSpaceManager* fm, unsigned long long start_block, unsigned long long metadata_size) {
-    block_mgr = bm;
-    free_mgr = fm;  // Store free_mgr to use in block allocation
-    this->start_block = start_block;
-    this->metadata_size = metadata_size;
-}
-
-bool MetadataManager::allocate_entry(MetadataEntry& entry) {
-    std::vector<unsigned char> blk;
-    unsigned int block_index = 0;
-    
-    // Use free_mgr to allocate a block
-    if (!free_mgr->allocate_one(block_index)) return false;
-
-    blk.resize(block_mgr->size());
-    std::memset(blk.data(), 0, blk.size());
-    entry.valid_flag = 1;  // Mark the entry as valid
-    entry.start_index = block_index;
-
-    // Write the entry into the block
-    std::memcpy(blk.data(), &entry, sizeof(MetadataEntry));
-    if (!block_mgr->write_block(block_index, blk)) return false;
-    
-    return true;
-}
-
-bool MetadataManager::write_entry(unsigned int index, const MetadataEntry& entry) {
-    std::vector<unsigned char> blk;
-    blk.resize(block_mgr->size());
-    std::memset(blk.data(), 0, blk.size());
-    std::memcpy(blk.data(), &entry, sizeof(MetadataEntry));
-
-    return block_mgr->write_block(index, blk);
-}
-
-bool MetadataManager::read_entry(unsigned int index, MetadataEntry& entry) {
-    std::vector<unsigned char> blk;
-    if (!block_mgr->read_block(index, blk)) return false;
-    std::memcpy(&entry, blk.data(), sizeof(MetadataEntry));
-    return true;
-}
-
-bool MetadataManager::find_entry_by_name(const char* name, MetadataEntry& entry) {
-    unsigned int index = start_block;
-    while (index < metadata_size) {
-        if (!read_entry(index, entry)) return false;
-        if (std::strncmp(entry.short_name, name, 12) == 0) return true;
-        index++;
+void FreeSpaceManager::bind(std::vector<unsigned char>* bm, unsigned int total_blocks) {
+    bitmap = bm;
+    blocks = total_blocks;
+    while (!free_stack.empty()) {
+        unsigned int v;
+        free_stack.pop(v);
     }
-    return false;
+    for (unsigned int i = 1; i <= blocks; i++) {
+        unsigned int byte_i = (i - 1) >> 3;
+        unsigned int bit_i = (i - 1) & 7;
+        bool used = ((*bitmap)[byte_i] >> bit_i) & 1u;
+        if (!used) {
+            free_stack.push(i);
+        }
+    }
+    std::cout << "FreeSpaceManager bound with " << blocks << " blocks, free=" << free_stack.size() << std::endl;
+}
+
+bool FreeSpaceManager::mark_used(unsigned int i) {
+    if (!bitmap) return false;
+    if (i == 0 || i > blocks) return false;
+    unsigned int byte_i = (i - 1) >> 3;
+    unsigned int bit_i = (i - 1) & 7;
+    (*bitmap)[byte_i] = (unsigned char)((*bitmap)[byte_i] | (1u << bit_i));
+    return true;
+}
+
+bool FreeSpaceManager::mark_free(unsigned int i) {
+    if (!bitmap) return false;
+    if (i == 0 || i > blocks) return false;
+    unsigned int byte_i = (i - 1) >> 3;
+    unsigned int bit_i = (i - 1) & 7;
+    (*bitmap)[byte_i] = (unsigned char)((*bitmap)[byte_i] & ~(1u << bit_i));
+    free_stack.push(i);
+    return true;
+}
+
+bool FreeSpaceManager::allocate_one(unsigned int& out) {
+    std::cout << "Attempting to allocate a free block..." << std::endl;
+    if (free_stack.empty()) {
+        std::cout << "No free blocks left!" << std::endl;
+        return false;
+    }
+    unsigned int v = 0;
+    free_stack.pop(v);
+    std::cout << "Allocated block: " << v << std::endl;
+    if (!mark_used(v)) return false;
+    out = v;
+    return true;
 }
