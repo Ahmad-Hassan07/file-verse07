@@ -1,53 +1,59 @@
-#include "FreeSpaceManager.h"
+#include "MetadataManager.h"
+#include <cstring>
 #include <iostream>
 
-void FreeSpaceManager::bind(std::vector<unsigned char>* bm, unsigned int total_blocks) {
-    bitmap = bm;
-    blocks = total_blocks;
-    while (!free_stack.empty()) {
-        unsigned int v;
-        free_stack.pop(v);
-    }
-    for (unsigned int i = 1; i <= blocks; i++) {
-        unsigned int byte_i = (i - 1) >> 3;
-        unsigned int bit_i = (i - 1) & 7;
-        bool used = ((*bitmap)[byte_i] >> bit_i) & 1u;
-        if (!used) {
-            free_stack.push(i);
+bool MetadataManager::init(void* file, uint64_t off, uint32_t count) {
+    base = file;
+    offset = off;
+    max_entries = count;
+    return true;
+}
+
+int MetadataManager::allocate_entry() {
+    for (uint32_t i = 0; i < max_entries; i++) {
+        MetadataEntry e;
+        read_entry(i, e);
+        if (e.valid_flag == 0) {
+            return i;
         }
     }
-    std::cout << "FreeSpaceManager bound with " << blocks << " blocks, free=" << free_stack.size() << std::endl;
+    return -1;
 }
 
-bool FreeSpaceManager::mark_used(unsigned int i) {
-    if (!bitmap) return false;
-    if (i == 0 || i > blocks) return false;
-    unsigned int byte_i = (i - 1) >> 3;
-    unsigned int bit_i = (i - 1) & 7;
-    (*bitmap)[byte_i] = (unsigned char)((*bitmap)[byte_i] | (1u << bit_i));
+bool MetadataManager::free_entry(int idx) {
+    if (idx < 0 || idx >= (int)max_entries) return false;
+    MetadataEntry zero{};
+    memset(&zero, 0, sizeof(MetadataEntry));
+    return write_entry(idx, zero);
+}
+
+bool MetadataManager::write_entry(int idx, const MetadataEntry& e) {
+    if (idx < 0 || idx >= (int)max_entries) return false;
+    uint8_t* ptr = (uint8_t*)base + offset + idx * sizeof(MetadataEntry);
+    memcpy(ptr, &e, sizeof(MetadataEntry));
     return true;
 }
 
-bool FreeSpaceManager::mark_free(unsigned int i) {
-    if (!bitmap) return false;
-    if (i == 0 || i > blocks) return false;
-    unsigned int byte_i = (i - 1) >> 3;
-    unsigned int bit_i = (i - 1) & 7;
-    (*bitmap)[byte_i] = (unsigned char)((*bitmap)[byte_i] & ~(1u << bit_i));
-    free_stack.push(i);
+bool MetadataManager::read_entry(int idx, MetadataEntry& e) {
+    if (idx < 0 || idx >= (int)max_entries) return false;
+    uint8_t* ptr = (uint8_t*)base + offset + idx * sizeof(MetadataEntry);
+    memcpy(&e, ptr, sizeof(MetadataEntry));
     return true;
 }
 
-bool FreeSpaceManager::allocate_one(unsigned int& out) {
-    std::cout << "Attempting to allocate a free block..." << std::endl;
-    if (free_stack.empty()) {
-        std::cout << "No free blocks left!" << std::endl;
-        return false;
+int MetadataManager::find_in_dir(uint32_t parent, const std::string& name) {
+    char shortname[12];
+    MetadataManager::to_short_name(name, shortname);  // ⭐ USE THE CORRECT RULE
+
+    for (uint32_t i = 0; i < max_entries; i++) {
+        MetadataEntry e;
+        read_entry(i, e);
+
+        if (!e.valid_flag) continue;
+        if (e.parent_index != parent) continue;
+
+        if (strncmp(e.short_name, shortname, 12) == 0)
+            return i;
     }
-    unsigned int v = 0;
-    free_stack.pop(v);
-    std::cout << "Allocated block: " << v << std::endl;
-    if (!mark_used(v)) return false;
-    out = v;
-    return true;
+    return -1;
 }
