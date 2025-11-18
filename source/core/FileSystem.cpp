@@ -1,373 +1,128 @@
 #include "FileSystem.h"
-
-#include <chrono>
 #include <iostream>
 #include <algorithm>
+#include <ctime>
 
-
-// --------- small internal helpers ----------
-
-static void fs_zero_bytes(std::vector<unsigned char>& buf) {
-    if (!buf.empty()) {
-        std::memset(buf.data(), 0, buf.size());
-    }
+// ==========================================================
+// Utility: current timestamp
+// ==========================================================
+uint64_t FileSystem::now_timestamp() {
+    return static_cast<uint64_t>(std::time(nullptr));
 }
 
-static void set_omni_magic(OMNIHeader& h) {
-    const char magic_str[8] = {'O','M','N','I','F','S','0','1'};
-    std::memcpy(h.magic, magic_str, sizeof(h.magic));
-}
-
-// =============================================
-// FileSystem ctor/dtor
-// =============================================
-FileSystem::FileSystem() : is_open(false) {
-    std::memset(&header, 0, sizeof(header));
-    std::memset(&layout, 0, sizeof(layout));
-    std::memset(&config, 0, sizeof(config));
+// ==========================================================
+// Constructor / destructor
+// ==========================================================
+FileSystem::FileSystem() {
+    is_open = false;
 }
 
 FileSystem::~FileSystem() {
     shutdown();
 }
 
-// =============================================
-// Layout computation
-// =============================================
-
-bool FileSystem::compute_layout() {
-    if (config.total_size == 0 ||
-        config.block_size == 0 ||
-        config.max_users == 0) {
-        return false;
-    }
-
-    layout.header_size = config.header_size;  // bytes reserved at start
-    if (layout.header_size == 0) {
-        // If not specified, default to sizeof(OMNIHeader) rounded up to 512.
-        layout.header_size = 512;
-    }
-
-    // --- user table area ---
-    layout.user_table_offset = layout.header_size;
-    layout.user_table_size   = static_cast<uint64_t>(config.max_users) * sizeof(UserInfo);
-
-    // For now, we leave meta area as 0 (Phase 2 / future).
-    layout.meta_offset = 0;
-    layout.meta_size   = 0;
-
-    // Remaining bytes after header + user table
-    if (config.total_size <= layout.header_size + layout.user_table_size) {
-        return false;
-    }
-    uint64_t remaining = config.total_size - layout.header_size - layout.user_table_size;
-
-    // We need to find a self-consistent number of blocks and bitmap size.
-    uint64_t block_size = config.block_size;
-    if (block_size == 0) return false;
-
-    // Initial naive guess: all remaining is data -> blocks_guess
-    uint64_t blocks = remaining / block_size;
-    if (blocks == 0) return false;
-
-    while (true) {
-        uint64_t bitmap_bytes = (blocks + 7) / 8; // 1 bit per block
-        if (remaining <= bitmap_bytes) {
-            return false;
-        }
-        uint64_t data_bytes = remaining - bitmap_bytes;
-        uint64_t new_blocks = data_bytes / block_size;
-        if (new_blocks == 0) return false;
-        if (new_blocks == blocks) {
-            // converged
-            layout.free_map_size = bitmap_bytes;
-            layout.data_size     = data_bytes;
-            break;
-        }
-        blocks = new_blocks;
-    }
-
-    layout.blocks_count    = static_cast<uint32_t>(blocks);
-    layout.free_map_offset = layout.user_table_offset + layout.user_table_size;
-    layout.data_offset     = layout.free_map_offset + layout.free_map_size;
-
-    // Final sanity
-    uint64_t end_pos = layout.data_offset + layout.data_size;
-    if (end_pos != config.total_size) {
-        // We can allow a little slack if rounding reduced a few bytes,
-        // but for now we require exact match.
-        if (end_pos > config.total_size) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-// =============================================
-// Stream handling
-// =============================================
+// ==========================================================
+// Low-level stream opening
+// ==========================================================
 bool FileSystem::open_stream(bool write) {
-    // If stream not open → open it correctly
-    if (!is_open) {
-        std::ios::openmode mode = std::ios::binary;
-        if (write) {
-            mode |= (std::ios::in | std::ios::out);
-        } else {
-            mode |= std::ios::in;
-        }
-        stream.open(omni_path.c_str(), mode);
-        if (!stream.is_open()) return false;
-        is_open = true;
-        return true;
-    }
+    if (is_open) return true;
 
-    // Stream is already open, but if we now need write → reopen
-    if (write) {
-        stream.close();
-        is_open = false;
-        std::ios::openmode mode = std::ios::binary | std::ios::in | std::ios::out;
-        stream.open(omni_path.c_str(), mode);
-        if (!stream.is_open()) return false;
-        is_open = true;
-    }
+    std::ios::openmode mode = std::ios::binary;
+    if (write) mode |= std::ios::in | std::ios::out;
+    else mode |= std::ios::in;
 
+    stream.open(omni_path, mode);
+    if (!stream.is_open()) return false;
+
+    is_open = true;
     return true;
 }
-
 
 void FileSystem::close_stream() {
-    if (is_open) {
-        stream.close();
-        is_open = false;
-    }
+    if (is_open) stream.close();
+    is_open = false;
 }
 
-// =============================================
-// Formatting a new .omni file
-// =============================================
-bool FileSystem::format_new(const FSConfig& cfg, const char* path) {
-    if (!path) return false;
+// ==========================================================
+// COMPUTE LAYOUT (Phase-1 logic)
+// ==========================================================
+bool FileSystem::compute_layout() {
+    layout.header_size = header.header_size;
 
-    config = cfg;
-    omni_path = path;
+    // ----- user table -----
+    layout.user_table_offset = layout.header_size;
+    layout.user_table_size   = header.max_users * sizeof(UserInfo);
 
-    if (!compute_layout()) {
-        std::cerr << "compute_layout() failed during format_new\n";
-        return false;
+    // ----- metadata region (Phase 2) -----
+    layout.meta_offset = layout.user_table_offset + layout.user_table_size;
+    layout.meta_size   = config.max_files * sizeof(MetadataEntry);
+
+    // ----- free-map + data area -----
+    layout.free_map_offset = layout.meta_offset + layout.meta_size;
+
+    uint64_t block_sz = config.block_size;
+    if (block_sz == 0) return false;
+
+    // Space left after we reach the start of the bitmap
+    uint64_t remaining = config.total_size - layout.free_map_offset;
+
+    // We don't know number of blocks yet because bitmap size depends on it.
+    // So: start from the max possible blocks and shrink until it fits:
+    uint64_t max_blocks = remaining / block_sz;
+    uint64_t blocks = max_blocks;
+
+    while (blocks > 0) {
+        uint64_t fm_size   = (blocks + 7) / 8;      // bitmap: 1 bit per block
+        uint64_t data_size = blocks * block_sz;
+        if (fm_size + data_size <= remaining) {
+            break;  // fits!
+        }
+        --blocks;
     }
 
-    // Prepare a full buffer for the new file
-    std::vector<unsigned char> buffer(config.total_size);
-    fs_zero_bytes(buffer);
-
-    // --- Header ---
-    OMNIHeader h;
-    std::memset(&h, 0, sizeof(h));
-    set_omni_magic(h);
-    h.format_version = 0x00010000; // v1.0 (example)
-    h.total_size     = config.total_size;
-    h.header_size    = layout.header_size;
-    h.block_size     = config.block_size;
-
-    // user-related header fields
-    h.user_table_offset = static_cast<uint32_t>(layout.user_table_offset);
-    h.max_users         = static_cast<uint32_t>(config.max_users);
-
-    // Phase 2 offsets: 0 for now
-    h.file_state_storage_offset = 0;
-    h.change_log_offset         = 0;
-
-    // copy header into buffer at start
-    std::memcpy(buffer.data(), &h, sizeof(h));
-    // remaining header region (layout.header_size - sizeof(h)) is already zero.
-
-    // --- User table area ---
-    unsigned char* user_ptr = buffer.data() + layout.user_table_offset;
-    std::memset(user_ptr, 0, layout.user_table_size);
-
-    // Add default admin user at index 0
-    if (config.admin_username[0] == '\0' || config.admin_password[0] == '\0') {
-        std::cerr << "Admin credentials not set in config\n";
-        return false;
-    }
-
-    UserInfo admin;
-    std::memset(&admin, 0, sizeof(admin));
-    std::strncpy(admin.username, config.admin_username, sizeof(admin.username) - 1);
-    std::strncpy(admin.password_hash, config.admin_password, sizeof(admin.password_hash) - 1);
-    admin.role         = UserRole::ADMIN;
-    admin.created_time = now_timestamp();
-    admin.last_login   = 0;
-    admin.is_active    = 1;
-    std::memset(admin.reserved, 0, sizeof(admin.reserved));
-
-    std::memcpy(user_ptr, &admin, sizeof(UserInfo));
-
-    // --- Free-space bitmap ---
-    unsigned char* bitmap_ptr = buffer.data() + layout.free_map_offset;
-    std::memset(bitmap_ptr, 0, layout.free_map_size);  // 0 => free
-
-    // Data region is already zeroed
-
-    // --- Write buffer to disk ---
-    std::ofstream out(omni_path.c_str(), std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        std::cerr << "Failed to open omni file for writing: " << omni_path << "\n";
-        return false;
-    }
-    out.write(reinterpret_cast<const char*>(buffer.data()),
-              static_cast<std::streamsize>(buffer.size()));
-    if (!out.good()) {
-        std::cerr << "Error writing to omni file: " << omni_path << "\n";
-        out.close();
-        return false;
-    }
-    out.close();
-
-    // Update in-memory state
-    header = h;
-    users.clear();
-    users.push_back(admin);
-    sessions.clear();
+    layout.blocks_count  = static_cast<uint32_t>(blocks);
+    layout.free_map_size = (layout.blocks_count + 7) / 8;
+    layout.data_offset   = layout.free_map_offset + layout.free_map_size;
+    layout.data_size     = layout.blocks_count * block_sz;
 
     return true;
 }
 
-// =============================================
-// Loading an existing .omni file
-// =============================================
+// ==========================================================
+// LOAD HEADER
+// ==========================================================
 bool FileSystem::load_header() {
-    if (!open_stream(false)) return false;
+    open_stream(true);
 
-    stream.seekg(0, std::ios::beg);
-    OMNIHeader h;
-    std::memset(&h, 0, sizeof(h));
-    stream.read(reinterpret_cast<char*>(&h), sizeof(h));
-    if (!stream.good()) {
-        return false;
-    }
-
-    // basic sanity checks
-    if (std::memcmp(h.magic, "OMNIFS01", 8) != 0) {
-        std::cerr << "Invalid magic in OMNI header\n";
-        return false;
-    }
-    if (h.total_size != config.total_size) {
-        std::cerr << "Header total_size mismatch\n";
-        return false;
-    }
-    if (h.block_size != config.block_size) {
-        std::cerr << "Header block_size mismatch\n";
-        return false;
-    }
-
-    header = h;
+    stream.seekg(0);
+    stream.read(reinterpret_cast<char*>(&header), sizeof(OMNIHeader));
     return true;
 }
 
+// ==========================================================
+// USERS
+// ==========================================================
 bool FileSystem::load_users_from_disk() {
-    if (!open_stream(false)) return false;
-
-    users.clear();
-    users.reserve(config.max_users);
-
-    stream.seekg(static_cast<std::streamoff>(layout.user_table_offset), std::ios::beg);
-    for (uint32_t i = 0; i < config.max_users; ++i) {
-        UserInfo u;
-        std::memset(&u, 0, sizeof(u));
-        stream.read(reinterpret_cast<char*>(&u), sizeof(u));
-        if (!stream.good()) {
-            return false;
-        }
-        if (u.is_active) {
-            users.push_back(u);
-        }
-    }
+    users.resize(config.max_users);
+    stream.seekg(layout.user_table_offset);
+    stream.read(reinterpret_cast<char*>(users.data()), layout.user_table_size);
     return true;
 }
 
 bool FileSystem::flush_users_to_disk() {
-    if (!open_stream(true)) return false;
-
-    // We store users in a fixed-size table of config.max_users slots.
-    std::vector<UserInfo> table(config.max_users);
-    std::memset(table.data(), 0, table.size() * sizeof(UserInfo));
-
-    // Fill sequentially with active users
-    size_t count = std::min<size_t>(users.size(), config.max_users);
-    for (size_t i = 0; i < count; ++i) {
-        table[i] = users[i];
-    }
-
-    stream.seekp(static_cast<std::streamoff>(layout.user_table_offset), std::ios::beg);
-    stream.write(reinterpret_cast<const char*>(table.data()),
-                 static_cast<std::streamsize>(table.size() * sizeof(UserInfo)));
-    if (!stream.good()) {
-        return false;
-    }
+    stream.seekp(layout.user_table_offset);
+    stream.write(reinterpret_cast<const char*>(users.data()), layout.user_table_size);
     stream.flush();
     return true;
 }
 
-bool FileSystem::load_existing(const FSConfig& cfg, const char* path) {
-    if (!path) return false;
-
-    config   = cfg;
-    omni_path = path;
-    sessions.clear();
-
-    // Layout must match the one used in format_new
-    if (!compute_layout()) {
-        std::cerr << "compute_layout() failed in load_existing\n";
-        return false;
-    }
-
-    if (!load_header()) {
-        std::cerr << "load_header() failed\n";
-        return false;
-    }
-    if (!load_users_from_disk()) {
-        std::cerr << "load_users_from_disk() failed\n";
-        return false;
-    }
-
-    return true;
-}
-
-// =============================================
-// Shutdown
-// =============================================
-void FileSystem::shutdown() {
-    // Free sessions
-    for (ActiveSession* s : sessions) {
-        delete s;
-    }
-    sessions.clear();
-
-    close_stream();
-}
-
-// =============================================
-// User / Session helpers
-// =============================================
-
 int FileSystem::find_user_index(const char* username) const {
-    if (!username) return -1;
-    for (size_t i = 0; i < users.size(); ++i) {
-        if (std::strncmp(users[i].username, username, sizeof(users[i].username)) == 0) {
-            return static_cast<int>(i);
-        }
+    for (size_t i = 0; i < users.size(); i++) {
+        if (users[i].is_active &&
+            std::strcmp(users[i].username, username) == 0)
+            return (int)i;
     }
     return -1;
-}
-
-ActiveSession* FileSystem::find_session(void* session) const {
-    ActiveSession* ptr = reinterpret_cast<ActiveSession*>(session);
-    for (ActiveSession* s : sessions) {
-        if (s == ptr) return s;
-    }
-    return nullptr;
 }
 
 bool FileSystem::session_is_admin(void* session) const {
@@ -376,218 +131,680 @@ bool FileSystem::session_is_admin(void* session) const {
     return s->info.user.role == UserRole::ADMIN;
 }
 
-uint64_t FileSystem::now_timestamp() {
-    using namespace std::chrono;
-    return duration_cast<seconds>(
-        system_clock::now().time_since_epoch()
-    ).count();
+ActiveSession* FileSystem::find_session(void* session) const {
+    for (auto* s : sessions)
+        if (s == session) return s;
+    return nullptr;
 }
 
-// =============================================
-// User / Session API
-// =============================================
+// ==========================================================
+// FORMAT NEW FILESYSTEM
+// ==========================================================
+bool FileSystem::format_new(const FSConfig& cfg, const char* path) {
+    config = cfg;
+    omni_path = path;
 
-OFSErrorCodes FileSystem::user_login(const char* username,
-                                     const char* password,
-                                     void** out_session) {
-    if (!out_session) return OFSErrorCodes::ERROR_INVALID_SESSION;
-    *out_session = nullptr;
+    // remove old
+    std::ofstream del(path, std::ios::binary | std::ios::trunc);
+    del.close();
 
-    if (!config.require_auth) {
-        // Auth disabled: create a synthetic session
-        ActiveSession* sess = new ActiveSession();
-        std::memset(&sess->info, 0, sizeof(sess->info));
-        std::strncpy(sess->info.session_id, "noauth_session", sizeof(sess->info.session_id) - 1);
+    // open
+    if (!open_stream(true))
+        return false;
 
-        // If username exists, use it; else create a dummy user struct
-        int idx = find_user_index(username ? username : "");
-        if (idx >= 0) {
-            sess->info.user = users[static_cast<size_t>(idx)];
-        } else {
-            std::memset(&sess->info.user, 0, sizeof(sess->info.user));
-            if (username) {
-                std::strncpy(sess->info.user.username, username,
-                             sizeof(sess->info.user.username) - 1);
-            }
-            sess->info.user.role      = UserRole::NORMAL;
-            sess->info.user.is_active = 1;
-        }
+    // build header
+    memset(&header, 0, sizeof(header));
+    std::memcpy(header.magic, "OMNIFS01", 8);
+    header.format_version = 0x00010000;
+    header.total_size = config.total_size;
+    header.header_size = 512;
+    header.block_size  = config.block_size;
+    header.max_users   = config.max_users;
 
-        uint64_t now = now_timestamp();
-        sess->info.login_time     = now;
-        sess->info.last_activity  = now;
-        sess->info.operations_count = 0;
-        std::memset(sess->info.reserved, 0, sizeof(sess->info.reserved));
+    compute_layout();
 
-        sessions.push_back(sess);
-        *out_session = sess;
-        return OFSErrorCodes::SUCCESS;
-    }
+    // write header
+    stream.seekp(0);
+    stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
-    // Auth is required: validate username+password
-    int idx = find_user_index(username);
-    if (idx < 0) {
-        return OFSErrorCodes::ERROR_NOT_FOUND;
-    }
+    // init user table
+    users.clear();
+    users.resize(config.max_users);
 
-    UserInfo& u = users[static_cast<size_t>(idx)];
-    if (!u.is_active) {
-        return OFSErrorCodes::ERROR_PERMISSION_DENIED;
-    }
+    // create admin
+    std::string admin_hash = "adminHASH";
+    users[0] = UserInfo("admin", admin_hash, UserRole::ADMIN, now_timestamp());
+    users[0].is_active = 1;
 
-    if (!password || std::strncmp(u.password_hash, password,
-                                  sizeof(u.password_hash)) != 0) {
-        return OFSErrorCodes::ERROR_PERMISSION_DENIED;
-    }
-
-    // Create session
-    ActiveSession* sess = new ActiveSession();
-    std::memset(&sess->info, 0, sizeof(sess->info));
-
-    // session_id = "sess_N"
-    char sid[64];
-    std::snprintf(sid, sizeof(sid), "sess_%zu", sessions.size() + 1);
-    std::strncpy(sess->info.session_id, sid, sizeof(sess->info.session_id) - 1);
-
-    sess->info.user = u;
-    uint64_t now = now_timestamp();
-    sess->info.login_time    = now;
-    sess->info.last_activity = now;
-    sess->info.operations_count = 0;
-
-    sessions.push_back(sess);
-    *out_session = sess;
-
-    // update last_login
-    u.last_login = now;
     flush_users_to_disk();
 
+    // init metadata table (zeroed)
+    stream.seekp(layout.meta_offset);
+    {
+        std::vector<uint8_t> zero(layout.meta_size);
+        stream.write((char*)zero.data(), zero.size());
+    }
+    // ----- CREATE ROOT DIRECTORY (meta index 0) -----
+{
+    MetadataEntry root{};
+    root.valid_flag = 1;
+    root.type_flag = 1;             // directory
+    root.parent_index = 0;
+    strncpy(root.short_name, "/", 10);
+    root.short_name[1] = '\0';
+    root.created_time = now_timestamp();
+    root.modified_time = now_timestamp();
+
+    stream.seekp(layout.meta_offset);
+    stream.write((char*)&root, sizeof(MetadataEntry));
+}
+
+    // init bitmap
+    stream.seekp(layout.free_map_offset);
+    {
+        std::vector<uint8_t> zero(layout.free_map_size);
+        stream.write((char*)zero.data(), zero.size());
+    }
+
+    // init data region
+    stream.seekp(layout.data_offset);
+    {
+        std::vector<uint8_t> zero(config.total_size - layout.data_offset);
+        stream.write((char*)zero.data(), zero.size());
+    }
+
+    stream.flush();
+    return true;
+}
+
+// ==========================================================
+// LOAD EXISTING
+// ==========================================================
+bool FileSystem::load_existing(const FSConfig& cfg, const char* path) {
+    config = cfg;
+    omni_path = path;
+
+    if (!open_stream(true)) return false;
+
+    load_header();
+    compute_layout();
+    load_users_from_disk();
+
+    // init managers
+    stream.seekg(0);
+    std::vector<uint8_t> file_image(config.total_size);
+    stream.read((char*)file_image.data(), file_image.size());
+
+    // metadata manager
+    meta.init(file_image.data(), layout.meta_offset, config.max_files);
+
+    // directory tree
+    tree.init(&meta);
+    tree.rebuild();
+
+    // FreeSpace manager
+    fsm.init(file_image.data(), layout.free_map_offset, layout.blocks_count);
+
+    // Block manager
+    blockman.init(file_image.data(),
+                  layout.data_offset,
+                  config.block_size,
+                 layout.blocks_count,
+                  &fsm);
+
+    return true;
+}
+
+// ==========================================================
+// SHUTDOWN
+// ==========================================================
+void FileSystem::shutdown() {
+    for (auto* s : sessions) delete s;
+    sessions.clear();
+    close_stream();
+}
+
+// ==========================================================
+// USER LOGIN
+// ==========================================================
+OFSErrorCodes FileSystem::user_login(const char* username,
+                                     const char* password,
+                                     void** out_session)
+{
+    int idx = find_user_index(username);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!users[idx].is_active)
+        return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    ActiveSession* s = new ActiveSession;
+    s->info = SessionInfo("session-ID", users[idx], now_timestamp());
+    sessions.push_back(s);
+
+    *out_session = s;
     return OFSErrorCodes::SUCCESS;
 }
 
 OFSErrorCodes FileSystem::user_logout(void* session) {
-    ActiveSession* s = find_session(session);
-    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
-
-    auto it = std::find(sessions.begin(), sessions.end(), s);
-    if (it != sessions.end()) {
-        sessions.erase(it);
+    for (size_t i = 0; i < sessions.size(); i++) {
+        if (sessions[i] == session) {
+            delete sessions[i];
+            sessions.erase(sessions.begin() + i);
+            return OFSErrorCodes::SUCCESS;
+        }
     }
-    delete s;
-    return OFSErrorCodes::SUCCESS;
+    return OFSErrorCodes::ERROR_INVALID_SESSION;
 }
 
-OFSErrorCodes FileSystem::user_create(void* admin_session,
+OFSErrorCodes FileSystem::user_create(void* admin,
                                       const char* username,
                                       const char* password,
-                                      UserRole role) {
-    if (!session_is_admin(admin_session)) {
+                                      UserRole role)
+{
+    if (!session_is_admin(admin))
         return OFSErrorCodes::ERROR_PERMISSION_DENIED;
+
+    if (find_user_index(username) >= 0)
+        return OFSErrorCodes::ERROR_FILE_EXISTS;
+
+    for (auto& u : users) {
+        if (!u.is_active) {
+            u = UserInfo(username, "HASH", role, now_timestamp());
+            u.is_active = 1;
+            flush_users_to_disk();
+            return OFSErrorCodes::SUCCESS;
+        }
     }
-    if (!username || !password) {
-        return OFSErrorCodes::ERROR_INVALID_OPERATION;
-    }
-
-    if (find_user_index(username) >= 0) {
-        return OFSErrorCodes::ERROR_FILE_EXISTS; // "user exists"
-    }
-
-    if (users.size() >= config.max_users) {
-        return OFSErrorCodes::ERROR_NO_SPACE;
-    }
-
-    UserInfo u;
-    std::memset(&u, 0, sizeof(u));
-    std::strncpy(u.username, username, sizeof(u.username) - 1);
-    std::strncpy(u.password_hash, password, sizeof(u.password_hash) - 1);
-    u.role         = role;
-    u.created_time = now_timestamp();
-    u.last_login   = 0;
-    u.is_active    = 1;
-    std::memset(u.reserved, 0, sizeof(u.reserved));
-
-    users.push_back(u);
-
-    if (!flush_users_to_disk()) {
-        return OFSErrorCodes::ERROR_IO_ERROR;
-    }
-
-    return OFSErrorCodes::SUCCESS;
+    return OFSErrorCodes::ERROR_NO_SPACE;
 }
 
-OFSErrorCodes FileSystem::user_delete(void* admin_session,
-                                      const char* username) {
-    if (!session_is_admin(admin_session)) {
+OFSErrorCodes FileSystem::user_delete(void* admin, const char* username) {
+    if (!session_is_admin(admin))
         return OFSErrorCodes::ERROR_PERMISSION_DENIED;
-    }
-    if (!username) return OFSErrorCodes::ERROR_INVALID_OPERATION;
-
-    // Never delete built-in admin
-    if (std::strcmp(username, config.admin_username) == 0) {
-        return OFSErrorCodes::ERROR_INVALID_OPERATION;
-    }
 
     int idx = find_user_index(username);
-    if (idx < 0) {
-        return OFSErrorCodes::ERROR_NOT_FOUND;
-    }
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
 
-    users.erase(users.begin() + idx);
-
-    if (!flush_users_to_disk()) {
-        return OFSErrorCodes::ERROR_IO_ERROR;
-    }
-
+    users[idx].is_active = 0;
+    flush_users_to_disk();
     return OFSErrorCodes::SUCCESS;
 }
 
-OFSErrorCodes FileSystem::user_list(void* admin_session,
+OFSErrorCodes FileSystem::user_list(void* admin,
                                     UserInfo** out_users,
-                                    int* out_count) {
-    if (!out_users || !out_count) {
-        return OFSErrorCodes::ERROR_INVALID_OPERATION;
-    }
-    *out_users = nullptr;
-    *out_count = 0;
-
-    if (!session_is_admin(admin_session)) {
+                                    int* out_count)
+{
+    if (!session_is_admin(admin))
         return OFSErrorCodes::ERROR_PERMISSION_DENIED;
-    }
 
-    if (users.empty()) {
-        return OFSErrorCodes::SUCCESS;
-    }
-
-    UserInfo* arr = new UserInfo[users.size()];
-    for (size_t i = 0; i < users.size(); ++i) {
-        arr[i] = users[i];
-    }
-
-    *out_users = arr;
-    *out_count = static_cast<int>(users.size());
+    *out_users = users.data();
+    *out_count = users.size();
     return OFSErrorCodes::SUCCESS;
 }
 
 OFSErrorCodes FileSystem::get_session_info(void* session,
-                                           SessionInfo* out_info) {
-    if (!out_info) return OFSErrorCodes::ERROR_INVALID_OPERATION;
+                                           SessionInfo* out)
+{
     ActiveSession* s = find_session(session);
     if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
-    *out_info = s->info;
+
+    *out = s->info;
     return OFSErrorCodes::SUCCESS;
 }
 
-// =============================================
-// Accessors
-// =============================================
-const FSConfig& FileSystem::get_config() const {
-    return config;
+// ==========================================================
+// INTERNAL HELPERS
+// ==========================================================
+
+int FileSystem::resolve_path(const char* path) {
+    std::string p(path);
+    return tree.resolve(p);
 }
 
-const OMNIHeader& FileSystem::get_header() const {
-    return header;
+bool FileSystem::is_dir(int idx) {
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+    return (e.valid_flag == 1 && e.type_flag == 1);
 }
 
-const FSLayout& FileSystem::get_layout() const {
-    return layout;
+bool FileSystem::is_file(int idx) {
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+    return (e.valid_flag == 1 && e.type_flag == 0);
+}
+
+bool FileSystem::has_permission(const ActiveSession* sess,
+                                const MetadataEntry& e,
+                                bool write_needed)
+{
+    // For now simplified: all can read, admin can write
+    if (!write_needed) return true;
+
+    if (sess->info.user.role == UserRole::ADMIN)
+        return true;
+
+    return false;
+}
+
+OFSErrorCodes FileSystem::allocate_file_entry(
+    int parent_idx,
+    const std::string& name,
+    uint32_t& out_idx)
+{
+    int idx = meta.allocate_entry();
+    if (idx < 0) return OFSErrorCodes::ERROR_NO_SPACE;
+
+    MetadataEntry e{};
+    e.valid_flag = 1;
+    e.type_flag = 0;
+    e.parent_index = parent_idx;
+
+    strncpy(e.short_name, name.c_str(), 10);
+    e.short_name[10] = '\0';
+
+    e.created_time = now_timestamp();
+    e.modified_time = now_timestamp();
+
+    out_idx = idx;
+    meta.write_entry(idx, e);
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// DIRECTORY CREATE
+// ==========================================================
+// ==========================================================
+// DIRECTORY CREATE
+// ==========================================================
+OFSErrorCodes FileSystem::dir_create(void* session, const char* path) {
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    std::string p(path);
+    if (p == "/" || p.empty())
+        return OFSErrorCodes::ERROR_INVALID_PATH;
+
+    size_t pos = p.find_last_of('/');
+    if (pos == std::string::npos)
+        return OFSErrorCodes::ERROR_INVALID_PATH;
+
+    std::string parent = p.substr(0, pos);
+    std::string name   = p.substr(pos + 1);
+
+    // ❗ NEW: reject paths where there is no name (like "////", "/docs/")
+    if (name.empty())
+        return OFSErrorCodes::ERROR_INVALID_PATH;
+
+    if (parent.empty())
+        parent = "/";
+
+    int parent_idx = resolve_path(parent.c_str());
+    if (parent_idx < 0)
+        return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_dir(parent_idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    // duplicate?
+    if (meta.find_in_dir(parent_idx, name) >= 0)
+        return OFSErrorCodes::ERROR_FILE_EXISTS;
+
+    int idx = meta.allocate_entry();
+    if (idx < 0) return OFSErrorCodes::ERROR_NO_SPACE;
+
+    MetadataEntry e{};
+    e.valid_flag   = 1;
+    e.type_flag    = 1;           // directory
+    e.parent_index = parent_idx;
+
+    strncpy(e.short_name, name.c_str(), 10);
+    e.short_name[10] = '\0';
+
+    e.created_time  = now_timestamp();
+    e.modified_time = now_timestamp();
+
+    meta.write_entry(idx, e);
+    tree.rebuild();
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// DIRECTORY DELETE
+// ==========================================================
+OFSErrorCodes FileSystem::dir_delete(void* session, const char* path) {
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_dir(idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    if (!tree.is_empty_dir(idx))
+        return OFSErrorCodes::ERROR_DIRECTORY_NOT_EMPTY;
+
+    meta.free_entry(idx);
+    tree.rebuild();
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// DIRECTORY LIST
+// ==========================================================
+OFSErrorCodes FileSystem::dir_list(void* session,
+                                   const char* path,
+                                   FileEntry** entries,
+                                   int* count)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int dir_idx = resolve_path(path);
+    if (dir_idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_dir(dir_idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    // gather children
+    std::vector<FileEntry> out;
+    MetadataEntry e;
+
+    for (uint32_t i = 0; i < meta.capacity(); i++) {
+        meta.read_entry(i, e);
+        if (!e.valid_flag) continue;
+        if (e.parent_index != (uint32_t)dir_idx) continue;
+
+        FileEntry fe;
+        strncpy(fe.name, e.short_name, 255);
+        fe.name[255] = '\0';
+
+        fe.type = e.type_flag;
+        fe.size = e.total_size;
+        fe.permissions = e.permissions;
+        fe.created_time = e.created_time;
+        fe.modified_time = e.modified_time;
+        fe.inode = i;
+
+        out.push_back(fe);
+    }
+
+    *count = out.size();
+    *entries = (FileEntry*)malloc(out.size() * sizeof(FileEntry));
+    memcpy(*entries, out.data(), out.size() * sizeof(FileEntry));
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILE CREATE
+// ==========================================================
+OFSErrorCodes FileSystem::file_create(void* session,
+                                      const char* path,
+                                      const char* data,
+                                      size_t size)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    std::string p(path);
+    size_t pos = p.find_last_of('/');
+    if (pos == std::string::npos)
+        return OFSErrorCodes::ERROR_INVALID_PATH;
+
+    std::string dir = p.substr(0, pos);
+    std::string name = p.substr(pos + 1);
+    if (dir == "") dir = "/";
+
+    int dir_idx = resolve_path(dir.c_str());
+    if (dir_idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_dir(dir_idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    if (meta.find_in_dir(dir_idx, name) >= 0)
+        return OFSErrorCodes::ERROR_FILE_EXISTS;
+
+    // allocate metadata
+    int idx = meta.allocate_entry();
+    if (idx < 0) return OFSErrorCodes::ERROR_NO_SPACE;
+
+    MetadataEntry e{};
+    e.valid_flag = 1;
+    e.type_flag  = 0;
+    e.parent_index = dir_idx;
+    strncpy(e.short_name, name.c_str(), 10);
+e.short_name[10] = '\0';
+
+    e.created_time = now_timestamp();
+    e.modified_time = now_timestamp();
+
+    // allocate first block
+    int blk = blockman.allocate_block();
+    if (blk < 0) return OFSErrorCodes::ERROR_NO_SPACE;
+
+    e.start_index = blk;
+    e.total_size = 0;
+
+    if (size > 0) {
+        if (blockman.write_file(blk, 0, (uint8_t*)data, size) < 0) {
+            blockman.free_block_chain(blk);
+            return OFSErrorCodes::ERROR_IO_ERROR;
+        }
+        e.total_size = size;
+    }
+
+    meta.write_entry(idx, e);
+    tree.rebuild();
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILE READ
+// ==========================================================
+OFSErrorCodes FileSystem::file_read(
+    void* session,
+    const char* path,
+    char** out_buffer,
+    size_t* out_size)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_file(idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    *out_size = e.total_size;
+    *out_buffer = (char*)malloc(e.total_size + 1);
+
+    if (blockman.read_file(e.start_index, 0,
+                           (uint8_t*)*out_buffer,
+                           e.total_size) < 0)
+        return OFSErrorCodes::ERROR_IO_ERROR;
+
+    (*out_buffer)[e.total_size] = '\0';
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILE EDIT (overwrite region)
+// ==========================================================
+OFSErrorCodes FileSystem::file_edit(
+    void* session,
+    const char* path,
+    const char* data,
+    size_t size,
+    unsigned int index)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    if (blockman.write_file(e.start_index, index,
+                            (uint8_t*)data, size) < 0)
+        return OFSErrorCodes::ERROR_IO_ERROR;
+
+    e.total_size = std::max<uint64_t>(e.total_size, index + size);
+    e.modified_time = now_timestamp();
+    meta.write_entry(idx, e);
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILE DELETE
+// ==========================================================
+OFSErrorCodes FileSystem::file_delete(void* session,
+                                      const char* path)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_file(idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    // free block chain
+    blockman.free_block_chain(e.start_index);
+
+    // free metadata
+    meta.free_entry(idx);
+
+    tree.rebuild();
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILE TRUNCATE
+// ==========================================================
+OFSErrorCodes FileSystem::file_truncate(void* session,
+                                        const char* path)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    if (!is_file(idx))
+        return OFSErrorCodes::ERROR_INVALID_OPERATION;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    blockman.free_block_chain(e.start_index);
+
+    // allocate fresh empty block
+    int blk = blockman.allocate_block();
+    if (blk < 0) return OFSErrorCodes::ERROR_NO_SPACE;
+
+    e.start_index = blk;
+    e.total_size = 0;
+    e.modified_time = now_timestamp();
+
+    meta.write_entry(idx, e);
+
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// METADATA
+// ==========================================================
+OFSErrorCodes FileSystem::get_metadata(void* session,
+                                       const char* path,
+                                       FileMetadata* meta_out)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    FileEntry fe;
+    strncpy(fe.name, e.short_name, 255);
+    fe.type = e.type_flag;
+    fe.size = e.total_size;
+    fe.permissions = e.permissions;
+    fe.created_time = e.created_time;
+    fe.modified_time = e.modified_time;
+    fe.inode = idx;
+
+    FileMetadata out(path, fe);
+    out.actual_size = e.total_size;
+
+    *meta_out = out;
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// SET PERMISSIONS
+// ==========================================================
+OFSErrorCodes FileSystem::set_permissions(
+    void* session,
+    const char* path,
+    uint32_t perms)
+{
+    if (!session_is_admin(session))
+        return OFSErrorCodes::ERROR_PERMISSION_DENIED;
+
+    int idx = resolve_path(path);
+    if (idx < 0) return OFSErrorCodes::ERROR_NOT_FOUND;
+
+    MetadataEntry e;
+    meta.read_entry(idx, e);
+
+    e.permissions = perms;
+    meta.write_entry(idx, e);
+    return OFSErrorCodes::SUCCESS;
+}
+
+// ==========================================================
+// FILESYSTEM STATS
+// ==========================================================
+OFSErrorCodes FileSystem::get_stats(void* session,
+                                    FSStats* st)
+{
+    ActiveSession* s = find_session(session);
+    if (!s) return OFSErrorCodes::ERROR_INVALID_SESSION;
+
+    FSStats stats(header.total_size,
+                  header.total_size - layout.data_size,
+                  layout.data_size);
+
+    stats.total_users = header.max_users;
+    stats.total_files = 0;
+    stats.total_directories = 0;
+
+    MetadataEntry e;
+    for (uint32_t i = 0; i < meta.capacity(); i++) {
+        meta.read_entry(i, e);
+        if (!e.valid_flag) continue;
+        if (e.type_flag == 0) stats.total_files++;
+        else stats.total_directories++;
+    }
+
+    *st = stats;
+    return OFSErrorCodes::SUCCESS;
 }

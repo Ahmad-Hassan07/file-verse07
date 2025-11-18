@@ -1,45 +1,44 @@
 #pragma once
-#include <vector>
 #include <cstdint>
+#include <vector>
+#include <cstring>
+
+#include "FreeSpaceManager.h"
 
 class BlockManager {
-    std::vector<unsigned char>* omni;
-    uint64_t block_size;
+private:
+    void* base;
     uint64_t data_offset;
+    uint32_t block_size;
+    uint32_t block_count;
+
+    FreeSpaceManager* fsm;
+
 public:
     BlockManager() {
-        omni = nullptr;
-        block_size = 0;
+        base = nullptr;
         data_offset = 0;
+        block_size = 0;
+        block_count = 0;
+        fsm = nullptr;
     }
-    void configure(std::vector<unsigned char>* buf, uint64_t blk_size, uint64_t data_off) {
-        omni = buf;
-        block_size = blk_size;
-        data_offset = data_off;
-    }
-    uint64_t size() const {
-        return block_size;
-    }
-    bool read_block(unsigned int index, std::vector<unsigned char>& out) {
-        if (!omni) return false;
-        if (index == 0) return false;
-        uint64_t offset = data_offset + (uint64_t)(index - 1) * block_size;
-        if (offset + block_size > omni->size()) return false;
-        out.resize(block_size);
-        for (uint64_t i = 0; i < block_size; i++) {
-            out[(size_t)i] = (*omni)[(size_t)(offset + i)];
-        }
-        return true;
-    }
-    bool write_block(unsigned int index, const std::vector<unsigned char>& in) {
-        if (!omni) return false;
-        if (index == 0) return false;
-        if (in.size() < block_size) return false;
-        uint64_t offset = data_offset + (uint64_t)(index - 1) * block_size;
-        if (offset + block_size > omni->size()) return false;
-        for (uint64_t i = 0; i < block_size; i++) {
-            (*omni)[(size_t)(offset + i)] = in[(size_t)i];
-        }
-        return true;
-    }
+
+    bool init(void* file, uint64_t data_off, uint32_t blk_size, uint32_t blk_count,
+              FreeSpaceManager* free_mgr);
+
+    // block operations
+    int allocate_block();
+    void free_block_chain(uint32_t start);
+
+    // read/write block
+    bool read_block(uint32_t blk, void* out);
+    bool write_block(uint32_t blk, const void* in);
+
+    // file chain helpers
+    uint32_t get_next(uint32_t blk);
+    void set_next(uint32_t blk, uint32_t next);
+
+    // read/write file content
+    int write_file(uint32_t start, uint64_t offset, const uint8_t* data, uint64_t len);
+    int read_file(uint32_t start, uint64_t offset, uint8_t* out, uint64_t len);
 };
