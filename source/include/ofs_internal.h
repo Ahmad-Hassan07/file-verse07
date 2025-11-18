@@ -6,34 +6,43 @@ struct FSConfig {
     uint64_t total_size;
     uint64_t header_size;
     uint64_t block_size;
+
     uint32_t max_users;
     uint32_t max_inodes;
+    uint32_t max_files;              // <-- REQUIRED
+    uint32_t max_filename_length;    // <-- REQUIRED
+
+    uint32_t require_auth;
+    uint32_t server_port;
+    uint32_t max_connections;
+    uint32_t queue_timeout;          // <-- REQUIRED
+
     char student_id[32];
     char submission_date[16];
     char admin_username[32];
     char admin_password[32];
     char private_key[64];
-    uint32_t require_auth;
-    uint32_t server_port;
-    uint32_t max_connections;
+
     FSConfig() {
         total_size = 0;
         header_size = 512;
         block_size = 0;
+
         max_users = 0;
         max_inodes = 0;
+        max_files = 0;
+        max_filename_length = 0;
+
         require_auth = 0;
         server_port = 0;
         max_connections = 0;
-        for (int i = 0; i < 32; i++) {
-            student_id[i] = 0;
-            submission_date[i] = 0;
-            admin_username[i] = 0;
-            admin_password[i] = 0;
-        }
-        for (int i = 0; i < 64; i++) {
-            private_key[i] = 0;
-        }
+        queue_timeout = 0;
+
+        memset(student_id, 0, sizeof(student_id));
+        memset(submission_date, 0, sizeof(submission_date));
+        memset(admin_username, 0, sizeof(admin_username));
+        memset(admin_password, 0, sizeof(admin_password));
+        memset(private_key, 0, sizeof(private_key));
     }
 };
 

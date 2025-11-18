@@ -247,5 +247,3 @@ struct FSStats {
 };
 
 #endif // ODF_TYPES_HPP
-
-//
