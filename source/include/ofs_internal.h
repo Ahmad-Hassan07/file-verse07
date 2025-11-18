@@ -1,5 +1,5 @@
 #pragma once
-#include <vector>
+#include <cstdint>
 #include "odf_types.hpp"
 
 struct FSConfig {
@@ -27,12 +27,13 @@ struct FSConfig {
         max_connections = 0;
         for (int i = 0; i < 32; i++) {
             student_id[i] = 0;
-            submission_date[i < 16 ? i : 0] = submission_date[i < 16 ? i : 0];
+            submission_date[i] = 0;
             admin_username[i] = 0;
             admin_password[i] = 0;
         }
-        for (int i = 0; i < 16; i++) submission_date[i] = 0;
-        for (int i = 0; i < 64; i++) private_key[i] = 0;
+        for (int i = 0; i < 64; i++) {
+            private_key[i] = 0;
+        }
     }
 };
 
@@ -50,7 +51,7 @@ struct MetadataEntry {
     uint64_t modified_time;
     uint8_t reserved[18];
     MetadataEntry() {
-        valid_flag = 1;
+        valid_flag = 0;
         type_flag = 0;
         parent_index = 0;
         for (int i = 0; i < 12; i++) short_name[i] = 0;
@@ -65,43 +66,13 @@ struct MetadataEntry {
 };
 #pragma pack(pop)
 
-struct ByteSpan {
-    uint64_t offset;
-    uint64_t size;
-};
-
-struct BlockSpan {
-    uint32_t start;
-    uint32_t count;
-};
-
-struct FreeSpan {
-    uint32_t start;
-    uint32_t count;
-};
-
-struct PathIndex {
-    uint32_t parent_inode;
-    uint32_t inode;
-};
-
-struct OpenFileHandle {
-    uint32_t inode;
-    uint64_t position;
-};
-
 struct MountLayout {
     uint64_t user_table_offset;
     uint64_t user_table_size;
-    uint64_t free_map_offset;
-    uint64_t free_map_size;
     uint64_t meta_offset;
     uint64_t meta_size;
+    uint64_t free_map_offset;
+    uint64_t free_map_size;
     uint64_t data_offset;
     uint64_t data_size;
-};
-
-struct SessionState {
-    SessionInfo session;
-    uint32_t mounted;
 };
